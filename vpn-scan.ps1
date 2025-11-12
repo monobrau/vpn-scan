@@ -93,6 +93,167 @@ function Get-LoggedInUsers {
     return $LoggedInUsers
 }
 
+function Get-InstalledVPNSoftware {
+    $InstalledVPNs = @()
+    
+    $VPNPatterns = @(
+        'nordvpn', 'expressvpn', 'surfshark', 'protonvpn', 'cyberghost',
+        'openvpn', 'wireguard', 'cisco', 'anyconnect', 'pulse', 'juniper',
+        'forticlient', 'globalprotect', 'checkpoint', 'sonicwall',
+        'privateinternetaccess', 'pia', 'windscribe', 'tunnelbear',
+        'ipvanish', 'hidemyass', 'torguard', 'mullvad', 'zenmate',
+        'vyprvpn', 'strongvpn', 'purevpn', 'hotspot', 'shield', 'betternet',
+        'vpn', 'tunnel', 'secure', 'connect', 'client'
+    )
+    
+    # Check Program Files
+    $ProgramPaths = @(
+        "${env:ProgramFiles}",
+        "${env:ProgramFiles(x86)}",
+        "${env:ProgramData}"
+    )
+    
+    foreach ($BasePath in $ProgramPaths) {
+        if (Test-Path $BasePath) {
+            try {
+                $Dirs = Get-ChildItem -Path $BasePath -Directory -ErrorAction SilentlyContinue
+                foreach ($Dir in $Dirs) {
+                    $DirName = $Dir.Name.ToLower()
+                    foreach ($Pattern in $VPNPatterns) {
+                        if ($DirName -like "*$Pattern*") {
+                            $InstalledVPNs += [PSCustomObject]@{
+                                Name = $Dir.Name
+                                Path = $Dir.FullName
+                                Source = "ProgramFiles"
+                                Pattern = $Pattern
+                            }
+                            break
+                        }
+                    }
+                }
+            }
+            catch {
+                # Skip access errors
+            }
+        }
+    }
+    
+    # Check Registry for installed programs
+    $RegPaths = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+    
+    foreach ($RegPath in $RegPaths) {
+        try {
+            $AllApps = Get-ItemProperty $RegPath -ErrorAction SilentlyContinue
+            foreach ($App in $AllApps) {
+                $DisplayName = if ($App.DisplayName) { $App.DisplayName.ToLower() } else { "" }
+                $Publisher = if ($App.Publisher) { $App.Publisher.ToLower() } else { "" }
+                
+                $IsVPN = $false
+                foreach ($Pattern in $VPNPatterns) {
+                    if ($DisplayName -like "*$Pattern*" -or $Publisher -like "*$Pattern*") {
+                        $IsVPN = $true
+                        break
+                    }
+                }
+                
+                if ($IsVPN) {
+                    $InstalledVPNs += [PSCustomObject]@{
+                        Name = $App.DisplayName
+                        Path = $App.InstallLocation
+                        Source = "Registry"
+                        Pattern = "Unknown"
+                    }
+                }
+            }
+        }
+        catch {
+            # Skip registry access errors
+        }
+    }
+    
+    return $InstalledVPNs | Sort-Object Name -Unique
+}
+
+function Get-VPNNetworkAdapters {
+    $VPNAdapters = @()
+    
+    try {
+        $Adapters = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object {
+            $Name = $_.Name.ToLower()
+            $InterfaceDescription = $_.InterfaceDescription.ToLower()
+            
+            $VPNKeywords = @('vpn', 'tunnel', 'tap', 'tun', 'pptp', 'l2tp', 'ipsec', 
+                            'openvpn', 'wireguard', 'nordlynx', 'wintun',
+                            'cisco', 'anyconnect', 'pulse', 'fortinet', 'palo', 'checkpoint')
+            
+            foreach ($Keyword in $VPNKeywords) {
+                if ($Name -like "*$Keyword*" -or $InterfaceDescription -like "*$Keyword*") {
+                    return $true
+                }
+            }
+            return $false
+        }
+        
+        foreach ($Adapter in $Adapters) {
+            $VPNAdapters += [PSCustomObject]@{
+                Name = $Adapter.Name
+                InterfaceDescription = $Adapter.InterfaceDescription
+                Status = $Adapter.Status
+                MacAddress = $Adapter.MacAddress
+            }
+        }
+    }
+    catch {
+        # Skip errors
+    }
+    
+    return $VPNAdapters
+}
+
+function Get-VPNServices {
+    $VPNServices = @()
+    
+    $VPNPatterns = @(
+        'nordvpn', 'expressvpn', 'surfshark', 'protonvpn', 'cyberghost',
+        'openvpn', 'wireguard', 'cisco', 'anyconnect', 'pulse', 'juniper',
+        'forticlient', 'globalprotect', 'checkpoint', 'sonicwall',
+        'privateinternetaccess', 'pia', 'windscribe', 'tunnelbear',
+        'ipvanish', 'hidemyass', 'torguard', 'mullvad', 'zenmate',
+        'vpn', 'tunnel', 'ras', 'remoteaccess'
+    )
+    
+    try {
+        $Services = Get-Service -ErrorAction SilentlyContinue | Where-Object {
+            $ServiceName = $_.Name.ToLower()
+            $DisplayName = $_.DisplayName.ToLower()
+            
+            foreach ($Pattern in $VPNPatterns) {
+                if ($ServiceName -like "*$Pattern*" -or $DisplayName -like "*$Pattern*") {
+                    return $true
+                }
+            }
+            return $false
+        }
+        
+        foreach ($Service in $Services) {
+            $VPNServices += [PSCustomObject]@{
+                Name = $Service.Name
+                DisplayName = $Service.DisplayName
+                Status = $Service.Status
+                StartType = $Service.StartType
+            }
+        }
+    }
+    catch {
+        # Skip errors
+    }
+    
+    return $VPNServices
+}
+
 function Get-AllVPNProcesses {
     $AllVPNProcesses = @()
     
@@ -101,7 +262,8 @@ function Get-AllVPNProcesses {
         'openvpn', 'wireguard', 'cisco', 'anyconnect', 'pulse', 'juniper',
         'forticlient', 'globalprotect', 'checkpoint', 'sonicwall',
         'privateinternetaccess', 'pia', 'windscribe', 'tunnelbear',
-        'ipvanish', 'hidemyass', 'torguard', 'mullvad', 'zenmate'
+        'ipvanish', 'hidemyass', 'torguard', 'mullvad', 'zenmate',
+        'vyprvpn', 'strongvpn', 'purevpn', 'hotspot', 'shield', 'betternet'
     )
     
     try {
@@ -199,28 +361,164 @@ function Get-AllUserVPNLogs {
         
         Write-Log "Scanning logs for user: $($User.Username)" "DarkGray"
         
+        $LocalAppData = $User.LocalAppData
+        $RoamingAppData = "$($User.ProfilePath)\AppData\Roaming"
+        $ProgramData = $env:ProgramData
+        
         $LogPaths = @{
-            "NordVPN" = "$($User.LocalAppData)\NordVPN\logs\*.log"
-            "ExpressVPN" = "$($User.LocalAppData)\expressvpn\*.log"
-            "Surfshark" = "$($User.LocalAppData)\Surfshark\logs\*.log"
-            "ProtonVPN" = "$($User.LocalAppData)\ProtonVPN\Logs\*.log"
-            "CyberGhost" = "$($User.LocalAppData)\CyberGhost 8\*.log"
-            "Cisco_AnyConnect" = "$($User.LocalAppData)\Cisco\Cisco AnyConnect Secure Mobility Client\Logs\*.log"
-            "Windscribe" = "$($User.LocalAppData)\Windscribe\*.log"
-            "WireGuard" = "$($User.LocalAppData)\WireGuard\*.log"
+            # Local AppData logs
+            "NordVPN" = @(
+                "$LocalAppData\NordVPN\logs\*.log",
+                "$LocalAppData\NordVPN\NordVPN.exe.log",
+                "$RoamingAppData\NordVPN\*.log"
+            )
+            "ExpressVPN" = @(
+                "$LocalAppData\expressvpn\*.log",
+                "$RoamingAppData\expressvpn\*.log"
+            )
+            "Surfshark" = @(
+                "$LocalAppData\Surfshark\logs\*.log",
+                "$LocalAppData\Surfshark\*.log"
+            )
+            "ProtonVPN" = @(
+                "$LocalAppData\ProtonVPN\Logs\*.log",
+                "$LocalAppData\ProtonVPN\*.log"
+            )
+            "CyberGhost" = @(
+                "$LocalAppData\CyberGhost 8\*.log",
+                "$LocalAppData\CyberGhost\*.log",
+                "$ProgramData\CyberGhost\*.log"
+            )
+            "Cisco_AnyConnect" = @(
+                "$LocalAppData\Cisco\Cisco AnyConnect Secure Mobility Client\Logs\*.log",
+                "$ProgramData\Cisco\Cisco AnyConnect Secure Mobility Client\Log\*.log"
+            )
+            "Windscribe" = @(
+                "$LocalAppData\Windscribe\*.log",
+                "$RoamingAppData\Windscribe\*.log"
+            )
+            "WireGuard" = @(
+                "$LocalAppData\WireGuard\*.log",
+                "$ProgramData\WireGuard\*.log"
+            )
+            "PrivateInternetAccess" = @(
+                "$LocalAppData\pia_manager\*.log",
+                "$LocalAppData\PrivateInternetAccess\*.log"
+            )
+            "TunnelBear" = @(
+                "$LocalAppData\TunnelBear\*.log",
+                "$RoamingAppData\TunnelBear\*.log"
+            )
+            "IPVanish" = @(
+                "$LocalAppData\IPVanish\*.log",
+                "$RoamingAppData\IPVanish\*.log"
+            )
+            "Mullvad" = @(
+                "$LocalAppData\Mullvad VPN\*.log",
+                "$ProgramData\Mullvad VPN\*.log"
+            )
+            "OpenVPN" = @(
+                "$ProgramData\OpenVPN\logs\*.log",
+                "$ProgramData\OpenVPN\*.log"
+            )
+            "PulseSecure" = @(
+                "$LocalAppData\Pulse Secure\*.log",
+                "$ProgramData\Pulse Secure\*.log"
+            )
+            "FortiClient" = @(
+                "$LocalAppData\Fortinet\FortiClient\logs\*.log",
+                "$ProgramData\Fortinet\FortiClient\logs\*.log"
+            )
+            "GlobalProtect" = @(
+                "$LocalAppData\Palo Alto Networks\GlobalProtect\logs\*.log",
+                "$ProgramData\Palo Alto Networks\GlobalProtect\logs\*.log"
+            )
+            "CheckPoint" = @(
+                "$LocalAppData\CheckPoint\*.log",
+                "$ProgramData\CheckPoint\*.log"
+            )
+            "SonicWall" = @(
+                "$LocalAppData\SonicWall\*.log",
+                "$ProgramData\SonicWall\*.log"
+            )
+            "Juniper" = @(
+                "$LocalAppData\Juniper Networks\*.log",
+                "$ProgramData\Juniper Networks\*.log"
+            )
+            "VyprVPN" = @(
+                "$LocalAppData\VyprVPN\*.log",
+                "$RoamingAppData\VyprVPN\*.log"
+            )
+            "StrongVPN" = @(
+                "$LocalAppData\StrongVPN\*.log",
+                "$RoamingAppData\StrongVPN\*.log"
+            )
+            "PureVPN" = @(
+                "$LocalAppData\PureVPN\*.log",
+                "$RoamingAppData\PureVPN\*.log"
+            )
         }
         
+        # Also scan for OpenVPN config files and logs
+        $ConfigPaths = @(
+            "$ProgramData\OpenVPN\config\*.ovpn",
+            "$ProgramData\OpenVPN\config\*.conf",
+            "$LocalAppData\OpenVPN\*.ovpn",
+            "$LocalAppData\OpenVPN\*.conf"
+        )
+        
         foreach ($ClientName in $LogPaths.Keys) {
-            $Path = $LogPaths[$ClientName]
+            $Paths = $LogPaths[$ClientName]
+            if ($Paths -isnot [array]) {
+                $Paths = @($Paths)
+            }
+            
+            foreach ($Path in $Paths) {
+                try {
+                    if (Test-Path $Path) {
+                        Write-Log "  Found $ClientName logs" "DarkGray"
+                        $LogFiles = Get-ChildItem $Path -ErrorAction SilentlyContinue | Where-Object {$_.LastWriteTime -gt $CutoffDate}
+                        
+                        foreach ($LogFile in $LogFiles) {
+                            $Content = Get-Content $LogFile.FullName -ErrorAction SilentlyContinue
+                            foreach ($Line in $Content) {
+                                if ($Line -match 'Connected to|Connecting to|server:|remote:|Gateway:|established|peer|endpoint|host|address') {
+                                    $IPMatches = [regex]::Matches($Line, '\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b')
+                                    foreach ($Match in $IPMatches) {
+                                        if ($Match.Value -eq '0.0.0.0' -or $Match.Value -eq '255.255.255.255') { continue }
+                                        
+                                        if (!$IncludePrivateIPs -and !(Test-PublicIP -IPAddress $Match.Value)) {
+                                            continue
+                                        }
+                                        
+                                        $AllLogs += [PSCustomObject]@{
+                                            IPAddress = $Match.Value
+                                            Client = $ClientName
+                                            Username = $User.Username
+                                            LogLine = $Line.Trim()
+                                            LastModified = $LogFile.LastWriteTime
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                catch {
+                    # Skip access errors silently
+                }
+            }
+        }
+        
+        # Scan OpenVPN config files for server IPs
+        foreach ($ConfigPath in $ConfigPaths) {
             try {
-                if (Test-Path $Path) {
-                    Write-Log "  Found $ClientName logs" "DarkGray"
-                    $LogFiles = Get-ChildItem $Path | Where-Object {$_.LastWriteTime -gt $CutoffDate}
-                    
-                    foreach ($LogFile in $LogFiles) {
-                        $Content = Get-Content $LogFile.FullName -ErrorAction SilentlyContinue
+                if (Test-Path $ConfigPath) {
+                    $ConfigFiles = Get-ChildItem $ConfigPath -ErrorAction SilentlyContinue
+                    foreach ($ConfigFile in $ConfigFiles) {
+                        $Content = Get-Content $ConfigFile.FullName -ErrorAction SilentlyContinue
                         foreach ($Line in $Content) {
-                            if ($Line -match 'Connected to|Connecting to|server:|remote:|Gateway:|established') {
+                            if ($Line -match '^remote\s+|^server\s+|^route\s+') {
                                 $IPMatches = [regex]::Matches($Line, '\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b')
                                 foreach ($Match in $IPMatches) {
                                     if ($Match.Value -eq '0.0.0.0' -or $Match.Value -eq '255.255.255.255') { continue }
@@ -231,10 +529,10 @@ function Get-AllUserVPNLogs {
                                     
                                     $AllLogs += [PSCustomObject]@{
                                         IPAddress = $Match.Value
-                                        Client = $ClientName
+                                        Client = "OpenVPN_Config"
                                         Username = $User.Username
                                         LogLine = $Line.Trim()
-                                        LastModified = $LogFile.LastWriteTime
+                                        LastModified = $ConfigFile.LastWriteTime
                                     }
                                 }
                             }
@@ -313,7 +611,40 @@ if ($IncludePrivateIPs) {
 
 $AllResults = @()
 
-Write-Log "`n[1/3] Scanning for active VPN connections..." "Yellow"
+Write-Log "`n[0/4] Detecting installed VPN software..." "Yellow"
+$InstalledVPNs = Get-InstalledVPNSoftware
+if ($InstalledVPNs.Count -gt 0) {
+    Write-Log "Found $($InstalledVPNs.Count) installed VPN client(s):" "Green"
+    foreach ($VPN in $InstalledVPNs) {
+        Write-Log "  - $($VPN.Name) ($($VPN.Source))" "Gray"
+    }
+} else {
+    Write-Log "No VPN software detected in standard locations" "Yellow"
+}
+
+Write-Log "`n[0.5/4] Checking VPN network adapters..." "Yellow"
+$VPNAdapters = Get-VPNNetworkAdapters
+if ($VPNAdapters.Count -gt 0) {
+    Write-Log "Found $($VPNAdapters.Count) VPN network adapter(s):" "Green"
+    foreach ($Adapter in $VPNAdapters) {
+        Write-Log "  - $($Adapter.Name) ($($Adapter.Status))" "Gray"
+    }
+} else {
+    Write-Log "No VPN network adapters found" "Gray"
+}
+
+Write-Log "`n[0.75/4] Checking VPN services..." "Yellow"
+$VPNServices = Get-VPNServices
+if ($VPNServices.Count -gt 0) {
+    Write-Log "Found $($VPNServices.Count) VPN-related service(s):" "Green"
+    foreach ($Service in $VPNServices) {
+        Write-Log "  - $($Service.DisplayName) ($($Service.Status))" "Gray"
+    }
+} else {
+    Write-Log "No VPN services found" "Gray"
+}
+
+Write-Log "`n[1/4] Scanning for active VPN connections..." "Yellow"
 $ActiveConnections = Get-AllVPNConnections
 Write-Log "Found $($ActiveConnections.Count) active VPN connections" "Green"
 
@@ -329,7 +660,7 @@ foreach ($Conn in $ActiveConnections) {
     }
 }
 
-Write-Log "`n[2/3] Scanning VPN client logs..." "Yellow"
+Write-Log "`n[2/4] Scanning VPN client logs..." "Yellow"
 $ClientLogs = Get-AllUserVPNLogs -DaysBack $DaysBack
 Write-Log "Found $($ClientLogs.Count) VPN log entries" "Green"
 
@@ -345,9 +676,11 @@ foreach ($Log in $ClientLogs) {
     }
 }
 
-Write-Log "`n[3/3] Scanning Windows Event Logs..." "Yellow"
+Write-Log "`n[3/4] Scanning Windows Event Logs..." "Yellow"
 $WindowsEvents = Get-WindowsVPNEvents -DaysBack $DaysBack
 Write-Log "Found $($WindowsEvents.Count) Windows VPN events" "Green"
+
+Write-Log "`n[4/4] Compiling results..." "Yellow"
 
 foreach ($Event in $WindowsEvents) {
     $AllResults += [PSCustomObject]@{
@@ -386,6 +719,11 @@ if ($UniqueResults.Count -gt 0) {
     Write-Log "  - VPN clients are running in different user sessions" "Gray"
     Write-Log "  - VPN logs are in non-standard locations" "Gray"
     Write-Log "  - All connections are to private IP ranges (use -IncludePrivateIPs)" "Gray"
+    Write-Log "  - VPN software may be installed but not configured/used" "Gray"
+    
+    if ($InstalledVPNs.Count -gt 0) {
+        Write-Log "`nNote: Found $($InstalledVPNs.Count) installed VPN client(s) but no active connections or logs" "Yellow"
+    }
 }
 
 Write-Log "`nScan completed" "Green"
