@@ -1,0 +1,42 @@
+# PowerShell
+*.ps1xml
+*.pssc
+*.psm1
+
+# Output files
+*.csv
+VPN_IPs_*.csv
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+~$*
+
+# User-specific files
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
