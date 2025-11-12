@@ -303,7 +303,10 @@ function Get-AllVPNProcesses {
 }
 
 function Get-AllVPNConnections {
+    param([int]$DaysBack = 30)
+    
     $VPNConnections = @()
+    $CutoffDate = (Get-Date).AddDays(-$DaysBack)
     
     try {
         $VPNProcesses = Get-AllVPNProcesses
@@ -311,37 +314,205 @@ function Get-AllVPNConnections {
         if ($VPNProcesses.Count -gt 0) {
             Write-Log "Found VPN processes: $($VPNProcesses.ProcessName -join ', ')" "Gray"
             
-            $Connections = Get-NetTCPConnection | Where-Object {
-                $_.State -eq 'Established' -and 
+            # Get all TCP connections (not just Established) for historical data
+            $AllConnections = Get-NetTCPConnection -ErrorAction SilentlyContinue | Where-Object {
                 $_.OwningProcess -in $VPNProcesses.ProcessId
             }
             
-            foreach ($Conn in $Connections) {
+            foreach ($Conn in $AllConnections) {
                 $VPNProcess = $VPNProcesses | Where-Object { $_.ProcessId -eq $Conn.OwningProcess }
                 
-                if (!$IncludePrivateIPs -and !(Test-PublicIP -IPAddress $Conn.RemoteAddress)) {
-                    continue
-                }
-                
-                $VPNConnections += [PSCustomObject]@{
-                    RemoteAddress = $Conn.RemoteAddress
-                    RemotePort = $Conn.RemotePort
-                    LocalAddress = $Conn.LocalAddress
-                    LocalPort = $Conn.LocalPort
-                    ProcessName = $VPNProcess.ProcessName
-                    VPNType = $VPNProcess.VPNType
-                    SessionId = $VPNProcess.SessionId
+                if ($VPNProcess) {
+                    if (!$IncludePrivateIPs -and !(Test-PublicIP -IPAddress $Conn.RemoteAddress)) {
+                        continue
+                    }
+                    
+                    $VPNConnections += [PSCustomObject]@{
+                        RemoteAddress = $Conn.RemoteAddress
+                        RemotePort = $Conn.RemotePort
+                        LocalAddress = $Conn.LocalAddress
+                        LocalPort = $Conn.LocalPort
+                        State = $Conn.State
+                        ProcessName = $VPNProcess.ProcessName
+                        VPNType = $VPNProcess.VPNType
+                        SessionId = $VPNProcess.SessionId
+                        ConnectionTime = Get-Date
+                    }
                 }
             }
         } else {
-            Write-Log "No VPN processes found" "Yellow"
+            Write-Log "No VPN processes found - scanning all connections for VPN patterns" "Yellow"
+            
+            # If no VPN processes found, scan all connections for VPN-like patterns
+            # Check for common VPN ports and connections
+            $VPNPorts = @(1194, 443, 1723, 4500, 500, 51820, 51821, 8080, 8443, 1195, 1196, 1197, 1198, 1199)
+            $AllConnections = Get-NetTCPConnection -ErrorAction SilentlyContinue
+            
+            foreach ($Conn in $AllConnections) {
+                if ($Conn.RemotePort -in $VPNPorts -or $Conn.LocalPort -in $VPNPorts) {
+                    if (!$IncludePrivateIPs -and !(Test-PublicIP -IPAddress $Conn.RemoteAddress)) {
+                        continue
+                    }
+                    
+                    try {
+                        $Process = Get-Process -Id $Conn.OwningProcess -ErrorAction SilentlyContinue
+                        $VPNConnections += [PSCustomObject]@{
+                            RemoteAddress = $Conn.RemoteAddress
+                            RemotePort = $Conn.RemotePort
+                            LocalAddress = $Conn.LocalAddress
+                            LocalPort = $Conn.LocalPort
+                            State = $Conn.State
+                            ProcessName = if ($Process) { $Process.Name } else { "Unknown" }
+                            VPNType = "Potential_VPN"
+                            SessionId = $Conn.OwningProcess
+                            ConnectionTime = Get-Date
+                        }
+                    }
+                    catch {
+                        # Skip if process not accessible
+                    }
+                }
+            }
         }
     }
     catch {
         Write-Log "Error getting network connections: $_" "Red"
     }
     
+    # Also check ARP table for recent VPN connections
+    try {
+        $ARPEntries = Get-NetNeighbor -ErrorAction SilentlyContinue | Where-Object {
+            $_.State -eq 'Reachable' -or $_.State -eq 'Stale'
+        }
+        
+        foreach ($ARP in $ARPEntries) {
+            if (!$IncludePrivateIPs -and !(Test-PublicIP -IPAddress $ARP.IPAddress)) {
+                continue
+            }
+            
+            # Check if IP is in known VPN ranges or has VPN-like MAC patterns
+            $VPNConnections += [PSCustomObject]@{
+                RemoteAddress = $ARP.IPAddress
+                RemotePort = 0
+                LocalAddress = "ARP"
+                LocalPort = 0
+                State = $ARP.State
+                ProcessName = "ARP_Table"
+                VPNType = "ARP_Entry"
+                SessionId = 0
+                ConnectionTime = Get-Date
+            }
+        }
+    }
+    catch {
+        # Skip ARP errors
+    }
+    
     return $VPNConnections
+}
+
+function Get-HistoricalNetworkConnections {
+    param([int]$DaysBack = 30)
+    
+    $HistoricalConnections = @()
+    $StartTime = (Get-Date).AddDays(-$DaysBack)
+    
+    # Check Windows Event Logs for network connection events
+    try {
+        $NetworkEvents = Get-WinEvent -FilterHashtable @{
+            LogName = 'Microsoft-Windows-NetworkProfile/Operational'
+            StartTime = $StartTime
+        } -ErrorAction SilentlyContinue -MaxEvents 1000
+        
+        foreach ($Event in $NetworkEvents) {
+            $IPMatches = [regex]::Matches($Event.Message, '\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b')
+            foreach ($Match in $IPMatches) {
+                if ($Match.Value -eq '0.0.0.0' -or $Match.Value -eq '255.255.255.255') { continue }
+                if (!$IncludePrivateIPs -and !(Test-PublicIP -IPAddress $Match.Value)) { continue }
+                
+                $HistoricalConnections += [PSCustomObject]@{
+                    RemoteAddress = $Match.Value
+                    RemotePort = 0
+                    LocalAddress = "EventLog"
+                    LocalPort = 0
+                    State = "Historical"
+                    ProcessName = "NetworkProfile"
+                    VPNType = "Network_Event"
+                    SessionId = 0
+                    ConnectionTime = $Event.TimeCreated
+                }
+            }
+        }
+    }
+    catch {
+        # Skip if log not accessible
+    }
+    
+    # Check System Event Log for network adapter connections
+    try {
+        $AdapterEvents = Get-WinEvent -FilterHashtable @{
+            LogName = 'System'
+            ProviderName = 'Microsoft-Windows-NetworkProfile'
+            StartTime = $StartTime
+        } -ErrorAction SilentlyContinue -MaxEvents 500
+        
+        foreach ($Event in $AdapterEvents) {
+            $IPMatches = [regex]::Matches($Event.Message, '\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b')
+            foreach ($Match in $IPMatches) {
+                if ($Match.Value -eq '0.0.0.0' -or $Match.Value -eq '255.255.255.255') { continue }
+                if (!$IncludePrivateIPs -and !(Test-PublicIP -IPAddress $Match.Value)) { continue }
+                
+                $HistoricalConnections += [PSCustomObject]@{
+                    RemoteAddress = $Match.Value
+                    RemotePort = 0
+                    LocalAddress = "SystemLog"
+                    LocalPort = 0
+                    State = "Historical"
+                    ProcessName = "NetworkAdapter"
+                    VPNType = "Adapter_Event"
+                    SessionId = 0
+                    ConnectionTime = $Event.TimeCreated
+                }
+            }
+        }
+    }
+    catch {
+        # Skip if log not accessible
+    }
+    
+    # Check DNS Resolver Cache for VPN-related domains
+    try {
+        $DNSCache = Get-DnsClientCache -ErrorAction SilentlyContinue | Where-Object {
+            $_.Name -match 'vpn|tunnel|secure|connect|server'
+        }
+        
+        foreach ($DNS in $DNSCache) {
+            if ($DNS.Data) {
+                $IPMatches = [regex]::Matches($DNS.Data, '\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b')
+                foreach ($Match in $IPMatches) {
+                    if ($Match.Value -eq '0.0.0.0' -or $Match.Value -eq '255.255.255.255') { continue }
+                    if (!$IncludePrivateIPs -and !(Test-PublicIP -IPAddress $Match.Value)) { continue }
+                    
+                    $HistoricalConnections += [PSCustomObject]@{
+                        RemoteAddress = $Match.Value
+                        RemotePort = 0
+                        LocalAddress = "DNSCache"
+                        LocalPort = 0
+                        State = "Cached"
+                        ProcessName = $DNS.Name
+                        VPNType = "DNS_Resolved"
+                        SessionId = 0
+                        ConnectionTime = Get-Date
+                    }
+                }
+            }
+        }
+    }
+    catch {
+        # Skip DNS cache errors
+    }
+    
+    return $HistoricalConnections
 }
 
 function Get-AllUserVPNLogs {
@@ -644,19 +815,36 @@ if ($VPNServices.Count -gt 0) {
     Write-Log "No VPN services found" "Gray"
 }
 
-Write-Log "`n[1/4] Scanning for active VPN connections..." "Yellow"
-$ActiveConnections = Get-AllVPNConnections
-Write-Log "Found $($ActiveConnections.Count) active VPN connections" "Green"
+Write-Log "`n[1/4] Scanning for VPN connections (active and historical)..." "Yellow"
+$ActiveConnections = Get-AllVPNConnections -DaysBack $DaysBack
+Write-Log "Found $($ActiveConnections.Count) VPN connections" "Green"
 
 foreach ($Conn in $ActiveConnections) {
+    $ConnectionTime = if ($Conn.ConnectionTime) { $Conn.ConnectionTime } else { Get-Date }
     $AllResults += [PSCustomObject]@{
-        TimeCreated = Get-Date
+        TimeCreated = $ConnectionTime
         IPAddress = $Conn.RemoteAddress
-        Source = "Active-$($Conn.VPNType)"
-        Details = "$($Conn.ProcessName) -> $($Conn.RemoteAddress):$($Conn.RemotePort)"
+        Source = "Connection-$($Conn.VPNType)"
+        Details = "$($Conn.ProcessName) -> $($Conn.RemoteAddress):$($Conn.RemotePort) [$($Conn.State)]"
     }
     if ($Verbose) {
-        Write-Log "  Active: $($Conn.RemoteAddress) via $($Conn.ProcessName)" "Gray"
+        Write-Log "  Connection: $($Conn.RemoteAddress) via $($Conn.ProcessName) [$($Conn.State)]" "Gray"
+    }
+}
+
+Write-Log "`n[1.5/4] Scanning historical network connections..." "Yellow"
+$HistoricalConnections = Get-HistoricalNetworkConnections -DaysBack $DaysBack
+Write-Log "Found $($HistoricalConnections.Count) historical network connections" "Green"
+
+foreach ($Conn in $HistoricalConnections) {
+    $AllResults += [PSCustomObject]@{
+        TimeCreated = $Conn.ConnectionTime
+        IPAddress = $Conn.RemoteAddress
+        Source = "Historical-$($Conn.VPNType)"
+        Details = "$($Conn.ProcessName) -> $($Conn.RemoteAddress) [$($Conn.State)]"
+    }
+    if ($Verbose) {
+        Write-Log "  Historical: $($Conn.RemoteAddress) from $($Conn.ProcessName)" "Gray"
     }
 }
 
@@ -676,7 +864,7 @@ foreach ($Log in $ClientLogs) {
     }
 }
 
-Write-Log "`n[3/4] Scanning Windows Event Logs..." "Yellow"
+Write-Log "`n[3/4] Scanning Windows VPN Event Logs..." "Yellow"
 $WindowsEvents = Get-WindowsVPNEvents -DaysBack $DaysBack
 Write-Log "Found $($WindowsEvents.Count) Windows VPN events" "Green"
 
